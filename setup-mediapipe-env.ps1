@@ -7,7 +7,7 @@
 # 退出虚拟环境
 # deactivate
 
-# Run these 2 commands below after install python 3.11
+# Run these 2 commands below after install python (version=3.11)
 
 # Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 # powershell -ExecutionPolicy Bypass -File .\setup-mediapipe-env.ps1
@@ -45,9 +45,9 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # Install mediapipe & others
-python -m pip install mediapipe==0.8.10.1 opencv-python>=4.5.0 tensorflow==2.5.0 scikit-learn>=0.23.2 matplotlib>=3.3.2
+python -m pip install mediapipe==0.10.21 opencv-python>=4.5.0 tensorflow==2.15.* scikit-learn>=0.23.2 matplotlib>=3.3.2
 if ($LASTEXITCODE -ne 0) {
-    Write-Warning "Installing mediapipe==0.8.10.1 failed. Trying mediapipe (latest) as fallback ..."
+    Write-Warning "Installing mediapipe==0.10.21 failed. Trying mediapipe (latest) as fallback ..."
     python -m pip install mediapipe
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Failed to install mediapipe. Please ensure you're in Python 3.11 x64."
