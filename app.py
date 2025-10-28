@@ -3,17 +3,22 @@
 import csv
 import copy
 import argparse
-import itertools
-from collections import Counter
-from collections import deque
+from collections import Counter, deque
+import types
+import time
 
 import cv2 as cv
 import numpy as np
 import mediapipe as mp
+import itertools
 
+# ===== 已有的模块 =====
 from utils import CvFpsCalc
-from model import KeyPointClassifier
-from model import PointHistoryClassifier
+from model import KeyPointClassifier, PointHistoryClassifier
+
+# ===== 新增：Tasks API =====
+from mediapipe.tasks import python as mp_python
+from mediapipe.tasks.python import vision as mp_vision
 
 
 def get_args():
@@ -30,18 +35,51 @@ def get_args():
                         default=0.7)
     parser.add_argument("--min_tracking_confidence",
                         help='min_tracking_confidence',
-                        type=int,
+                        type=float,   # ← 旧代码是 int，改为 float 更合理
                         default=0.5)
 
-    args = parser.parse_args()
+    # 可选：自定义 HandLandmarker 模型路径
+    parser.add_argument("--hand_task",
+                        type=str,
+                        default="hand_landmarker.task",
+                        help="Path to hand_landmarker.task")
+    parser.add_argument("--max_num_hands",
+                        type=int,
+                        default=1)
 
-    return args
+    return parser.parse_args()
+
+
+# --- 小工具：用像素坐标列表计算手部矩形 (x1, y1, x2, y2) ---
+def calc_brect_from_pixel_landmarks(img_shape, landmark_list_px):
+    h, w = img_shape[:2]
+    xs = [pt[0] for pt in landmark_list_px if pt is not None]
+    ys = [pt[1] for pt in landmark_list_px if pt is not None]
+    if not xs or not ys:
+        return (0, 0, 0, 0)
+    x1 = max(min(xs), 0)
+    y1 = max(min(ys), 0)
+    x2 = min(max(xs), w - 1)
+    y2 = min(max(ys), h - 1)
+    return (x1, y1, x2, y2)
+
+
+# --- 小工具：把 Tasks 的 handedness 转成旧接口风格（有 .classification[0].label）---
+def handedness_to_legacy(handedness_categories):
+    """
+    handedness_categories: List[Category] (Tasks 的一只手的候选列表)
+    返回一个具备 .classification[0].label 的对象，兼容你旧的 draw_info_text(...)
+    """
+    label = handedness_categories[0].category_name if handedness_categories else "Unknown"
+    score = handedness_categories[0].score if handedness_categories else 0.0
+    # 构造旧风格：results.multi_handedness[i].classification[0].label / .score
+    classification = [types.SimpleNamespace(label=label, score=score)]
+    return types.SimpleNamespace(classification=classification)
 
 
 def main():
-    # Argument parsing #################################################################
+    # ========= 参数 =========
     args = get_args()
-
     cap_device = args.device
     cap_width = args.width
     cap_height = args.height
@@ -49,122 +87,131 @@ def main():
     use_static_image_mode = args.use_static_image_mode
     min_detection_confidence = args.min_detection_confidence
     min_tracking_confidence = args.min_tracking_confidence
+    max_num_hands = args.max_num_hands
+    hand_task_path = args.hand_task
 
     use_brect = True
 
-    # Camera preparation ###############################################################
+    # ========= 摄像头 =========
     cap = cv.VideoCapture(cap_device)
     cap.set(cv.CAP_PROP_FRAME_WIDTH, cap_width)
     cap.set(cv.CAP_PROP_FRAME_HEIGHT, cap_height)
 
-    # Model load #############################################################
-    mp_hands = mp.solutions.hands
-    hands = mp_hands.Hands(
-        static_image_mode=use_static_image_mode,
-        max_num_hands=1,
-        min_detection_confidence=min_detection_confidence,
-        min_tracking_confidence=min_tracking_confidence,
+    # ========= MediaPipe Tasks: HandLandmarker 初始化 =========
+    running_mode = (mp_vision.RunningMode.IMAGE
+                    if use_static_image_mode else mp_vision.RunningMode.VIDEO)
+
+    base_options = mp_python.BaseOptions(model_asset_path=hand_task_path)
+    options = mp_vision.HandLandmarkerOptions(
+        base_options=base_options,
+        running_mode=running_mode,
+        num_hands=max_num_hands,
+        min_hand_detection_confidence=min_detection_confidence,
+        min_hand_presence_confidence=min_detection_confidence,
+        min_tracking_confidence=min_tracking_confidence
     )
+    landmarker = mp_vision.HandLandmarker.create_from_options(options)
 
+    # ========= 你自己的分类器 =========
     keypoint_classifier = KeyPointClassifier()
-
     point_history_classifier = PointHistoryClassifier()
 
-    # Read labels ###########################################################
+    # ========= 标签文件 =========
     with open('model/keypoint_classifier/keypoint_classifier_label.csv',
               encoding='utf-8-sig') as f:
-        keypoint_classifier_labels = csv.reader(f)
-        keypoint_classifier_labels = [
-            row[0] for row in keypoint_classifier_labels
-        ]
-    with open(
-            'model/point_history_classifier/point_history_classifier_label.csv',
-            encoding='utf-8-sig') as f:
-        point_history_classifier_labels = csv.reader(f)
-        point_history_classifier_labels = [
-            row[0] for row in point_history_classifier_labels
-        ]
+        keypoint_classifier_labels = [row[0] for row in csv.reader(f)]
 
-    # FPS Measurement ########################################################
+    with open('model/point_history_classifier/point_history_classifier_label.csv',
+              encoding='utf-8-sig') as f:
+        point_history_classifier_labels = [row[0] for row in csv.reader(f)]
+
+    # ========= FPS / 历史序列 =========
     cvFpsCalc = CvFpsCalc(buffer_len=10)
-
-    # Coordinate history #################################################################
     history_length = 16
     point_history = deque(maxlen=history_length)
-
-    # Finger gesture history ################################################
     finger_gesture_history = deque(maxlen=history_length)
 
-    #  ########################################################################
     mode = 0
+    timestamp_ms = 0  # VIDEO 模式需要单调递增时间戳（毫秒）
 
     while True:
         fps = cvFpsCalc.get()
 
-        # Process Key (ESC: end) #################################################
+        # 键盘控制
         key = cv.waitKey(10)
         if key == 27:  # ESC
             break
         number, mode = select_mode(key, mode)
 
-        # Camera capture #####################################################
-        ret, image = cap.read()
+        # 读帧
+        ret, frame_bgr = cap.read()
         if not ret:
             break
-        image = cv.flip(image, 1)  # Mirror display
-        debug_image = copy.deepcopy(image)
+        frame_bgr = cv.flip(frame_bgr, 1)
+        debug_image = copy.deepcopy(frame_bgr)
 
-        # Detection implementation #############################################################
-        image = cv.cvtColor(image, cv.COLOR_BGR2RGB)
+        # 转成 MediaPipe Image（SRGB）
+        frame_rgb = cv.cvtColor(frame_bgr, cv.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
 
-        image.flags.writeable = False
-        results = hands.process(image)
-        image.flags.writeable = True
+        # 推理
+        if running_mode == mp_vision.RunningMode.IMAGE:
+            result = landmarker.detect(mp_image)
+        else:
+            # 时间戳：你也可以用 time.monotonic()*1000
+            timestamp_ms += int(1000 / max(1, cap.get(cv.CAP_PROP_FPS) or 30))
+            result = landmarker.detect_for_video(mp_image, timestamp_ms)
 
-        #  ####################################################################
-        if results.multi_hand_landmarks is not None:
-            for hand_landmarks, handedness in zip(results.multi_hand_landmarks,
-                                                  results.multi_handedness):
-                # Bounding box calculation
-                brect = calc_bounding_rect(debug_image, hand_landmarks)
-                # Landmark calculation
-                landmark_list = calc_landmark_list(debug_image, hand_landmarks)
+        # 处理结果
+        if result.hand_landmarks:
+            # hand_landmarks: List[List[Landmark]] (每只手21点；x/y/z 为归一化坐标)
+            # handedness    : List[List[Category]]（每只手的左右手候选）
+            for hand_idx in range(len(result.hand_landmarks)):
+                landmarks = result.hand_landmarks[hand_idx]
+                handedness_categories = result.handedness[hand_idx]
 
-                # Conversion to relative coordinates / normalized coordinates
-                pre_processed_landmark_list = pre_process_landmark(
-                    landmark_list)
-                pre_processed_point_history_list = pre_process_point_history(
-                    debug_image, point_history)
-                # Write to the dataset file
+                # 归一化坐标 → 像素坐标（与你旧的 landmark_list 结构一致）
+                h, w = frame_bgr.shape[:2]
+                landmark_list_px = [[int(lm.x * w), int(lm.y * h)] for lm in landmarks]
+
+                # 计算边框（像素）
+                brect = calc_brect_from_pixel_landmarks(frame_bgr.shape, landmark_list_px)
+
+                # === 你原有的预处理 ===
+                pre_processed_landmark_list = pre_process_landmark(landmark_list_px)
+                pre_processed_point_history_list = pre_process_point_history(debug_image, point_history)
+
+                # 记录数据（如果你启用了采集）
                 logging_csv(number, mode, pre_processed_landmark_list,
                             pre_processed_point_history_list)
 
-                # Hand sign classification
+                # === 手势分类（自定义）===
                 hand_sign_id = keypoint_classifier(pre_processed_landmark_list)
-                if hand_sign_id == 2:  # Point gesture
-                    point_history.append(landmark_list[8])
+                if hand_sign_id == 2:  # 比如“指点”手势（与你原来的逻辑一致）
+                    # index finger tip = 8
+                    point_history.append(landmark_list_px[8])
                 else:
                     point_history.append([0, 0])
 
-                # Finger gesture classification
+                # 动作（轨迹）分类
                 finger_gesture_id = 0
-                point_history_len = len(pre_processed_point_history_list)
-                if point_history_len == (history_length * 2):
-                    finger_gesture_id = point_history_classifier(
-                        pre_processed_point_history_list)
+                if len(pre_processed_point_history_list) == (history_length * 2):
+                    finger_gesture_id = point_history_classifier(pre_processed_point_history_list)
 
-                # Calculates the gesture IDs in the latest detection
                 finger_gesture_history.append(finger_gesture_id)
-                most_common_fg_id = Counter(
-                    finger_gesture_history).most_common()
+                most_common_fg_id = Counter(finger_gesture_history).most_common()
 
-                # Drawing part
+                # === 绘制 ===
                 debug_image = draw_bounding_rect(use_brect, debug_image, brect)
-                debug_image = draw_landmarks(debug_image, landmark_list)
+                debug_image = draw_landmarks(debug_image, landmark_list_px)
+
+                # handedness 适配为旧风格对象，避免你改 draw_info_text(...)
+                legacy_handed = handedness_to_legacy(handedness_categories)
+
                 debug_image = draw_info_text(
                     debug_image,
                     brect,
-                    handedness,
+                    legacy_handed,
                     keypoint_classifier_labels[hand_sign_id],
                     point_history_classifier_labels[most_common_fg_id[0][0]],
                 )
@@ -174,8 +221,7 @@ def main():
         debug_image = draw_point_history(debug_image, point_history)
         debug_image = draw_info(debug_image, fps, mode, number)
 
-        # Screen reflection #############################################################
-        cv.imshow('Hand Gesture Recognition', debug_image)
+        cv.imshow('Hand Gesture Recognition (Tasks API)', debug_image)
 
     cap.release()
     cv.destroyAllWindows()
