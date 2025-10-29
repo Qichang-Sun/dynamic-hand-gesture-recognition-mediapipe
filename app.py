@@ -15,6 +15,7 @@ import itertools
 # ===== 已有的模块 =====
 from utils import CvFpsCalc
 from model import KeyPointClassifier, PointHistoryClassifier
+# from model import FullSequenceClassifier
 
 # ===== 新增：Tasks API =====
 from mediapipe.tasks import python as mp_python
@@ -112,9 +113,16 @@ def main():
     )
     landmarker = mp_vision.HandLandmarker.create_from_options(options)
 
-    # ========= 你自己的分类器 =========
+    # ========= 训练好的分类器 =========
     keypoint_classifier = KeyPointClassifier()
     point_history_classifier = PointHistoryClassifier()
+    # fullseq_classifier = FullSequenceClassifier(
+    #     model_path='model/full_sequence_classifier/full_sequence_classifier.tflite',
+    #     label_path='model/full_sequence_classifier/full_sequence_classifier_label.csv',
+    #     time_steps=16,
+    #     dim_per_frame=42
+    # )
+
 
     # ========= 标签文件 =========
     with open('model/keypoint_classifier/keypoint_classifier_label.csv',
@@ -131,6 +139,10 @@ def main():
     point_history = deque(maxlen=history_length)
     finger_gesture_history = deque(maxlen=history_length)
 
+    # ========= 全手点序列采集设置（2D）=========
+    fullseq_dim_per_frame = 21 * 2       # 2D: 每帧 21 点 × (x,y) = 42
+    fullseq_history_list = deque(maxlen=history_length)
+    
     mode = 0
     timestamp_ms = 0  # VIDEO 模式需要单调递增时间戳（毫秒）
 
@@ -170,28 +182,32 @@ def main():
                 landmarks = result.hand_landmarks[hand_idx]
                 handedness_categories = result.handedness[hand_idx]
 
-                # 归一化坐标 → 像素坐标（与你旧的 landmark_list 结构一致）
+                # 归一化坐标 → 像素坐标（与旧的 landmark_list 结构一致）
                 h, w = frame_bgr.shape[:2]
                 landmark_list_px = [[int(lm.x * w), int(lm.y * h)] for lm in landmarks]
 
                 # 计算边框（像素）
                 brect = calc_brect_from_pixel_landmarks(frame_bgr.shape, landmark_list_px)
 
-                # === 你原有的预处理 ===
+                # === 原有的预处理 ===
                 pre_processed_landmark_list = pre_process_landmark(landmark_list_px)
                 pre_processed_point_history_list = pre_process_point_history(debug_image, point_history)
+                fullseq_history_list.append(pre_processed_landmark_list)
 
-                # 记录数据（如果你启用了采集）
+                # 记录数据（如果启用了采集）
                 logging_csv(number, mode, pre_processed_landmark_list,
                             pre_processed_point_history_list)
+                # >>> 记录全手序列（mode=3，按 0~9 落盘到 full_sequence.csv）
+                logging_fullseq_csv(number, mode, fullseq_history_list, history_length, fullseq_dim_per_frame)
 
                 # === 手势分类（自定义）===
                 hand_sign_id = keypoint_classifier(pre_processed_landmark_list)
-                if hand_sign_id == 2:  # 比如“指点”手势（与你原来的逻辑一致）
+                if hand_sign_id == 2:  # 比如“指点”手势（与原来的逻辑一致）
                     # index finger tip = 8
                     point_history.append(landmark_list_px[8])
                 else:
                     point_history.append([0, 0])
+                    fullseq_history_list.append([0.0] * fullseq_dim_per_frame)
 
                 # 动作（轨迹）分类
                 finger_gesture_id = 0
@@ -201,11 +217,18 @@ def main():
                 finger_gesture_history.append(finger_gesture_id)
                 most_common_fg_id = Counter(finger_gesture_history).most_common()
 
+                # === 全手时序分类（当缓冲满16帧时）===
+                # if len(fullseq_history_list) == 16:
+                #     flat = list(itertools.chain.from_iterable(list(fullseq_history_list)))
+                #     score, label = fullseq_classifier.infer(np.array(flat, dtype=np.float32))
+                # else:
+                #     score, label = None, None, None
+
                 # === 绘制 ===
                 debug_image = draw_bounding_rect(use_brect, debug_image, brect)
                 debug_image = draw_landmarks(debug_image, landmark_list_px)
 
-                # handedness 适配为旧风格对象，避免你改 draw_info_text(...)
+                # handedness 适配为旧风格对象，避免改 draw_info_text(...)
                 legacy_handed = handedness_to_legacy(handedness_categories)
 
                 debug_image = draw_info_text(
@@ -215,6 +238,15 @@ def main():
                     keypoint_classifier_labels[hand_sign_id],
                     point_history_classifier_labels[most_common_fg_id[0][0]],
                 )
+                
+                # 在左上角追加 FullSeq 分类结果
+                # if label is not None:
+                #     txt = f'FullSeq: {label} ({score:.2f})'
+                #     cv.putText(debug_image, txt, (10, 120), cv.FONT_HERSHEY_SIMPLEX,
+                #             0.6, (0, 0, 0), 4, cv.LINE_AA)
+                #     cv.putText(debug_image, txt, (10, 120), cv.FONT_HERSHEY_SIMPLEX,
+                #             0.6, (255, 255, 255), 2, cv.LINE_AA)
+
         else:
             point_history.append([0, 0])
 
@@ -237,6 +269,8 @@ def select_mode(key, mode):
         mode = 1
     if key == 104:  # h
         mode = 2
+    if key == 102:  # f
+        mode = 3
     return number, mode
 
 
@@ -339,6 +373,24 @@ def logging_csv(number, mode, landmark_list, point_history_list):
             writer.writerow([number, *point_history_list])
     return
 
+def logging_fullseq_csv(number, mode, fullseq_sequence, time_steps, dim_per_frame):
+    """
+    当 mode == 3 且按下 0~9 时，把最近 T 帧 x 每帧维度 的展平向量写入 CSV
+    """
+    csv_path = 'model/full_sequence_classifier/full_sequence.csv'
+    if mode == 3 and (0 <= number <= 9):
+        if len(fullseq_sequence) == time_steps:
+            # 展平: T × D -> 1D
+            flat = list(itertools.chain.from_iterable(list(fullseq_sequence)))
+            if len(flat) == time_steps * dim_per_frame:
+                with open(csv_path, 'a', newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow([number, *flat])
+                print(f'[FullSeq] Saved class={number}, steps={time_steps}, dim_per_frame={dim_per_frame}')
+            else:
+                print(f'[FullSeq] length mismatch: {len(flat)} != {time_steps * dim_per_frame}')
+        else:
+            print(f'[FullSeq] buffer not full: {len(fullseq_sequence)}/{time_steps}')
 
 def draw_landmarks(image, landmark_point):
     if len(landmark_point) > 0:
@@ -573,8 +625,8 @@ def draw_info(image, fps, mode, number):
     cv.putText(image, "FPS:" + str(fps), (10, 30), cv.FONT_HERSHEY_SIMPLEX,
                1.0, (255, 255, 255), 2, cv.LINE_AA)
 
-    mode_string = ['Logging Key Point', 'Logging Point History']
-    if 1 <= mode <= 2:
+    mode_string = ['Logging Key Point', 'Logging Point History', 'Logging Full Hand Seq']
+    if 1 <= mode <= 3:
         cv.putText(image, "MODE:" + mode_string[mode - 1], (10, 90),
                    cv.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1,
                    cv.LINE_AA)
