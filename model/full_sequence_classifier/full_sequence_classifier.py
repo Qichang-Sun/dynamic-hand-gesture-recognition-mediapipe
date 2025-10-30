@@ -43,7 +43,7 @@ class FullSequenceClassifier:
 
     def _load_labels(self, path: str):
         labels = []
-        with open(path, 'r', encoding='utf-8') as f:
+        with open(path, 'r', encoding='utf-8-sig') as f:
             for row in csv.reader(f):
                 if not row:
                     continue

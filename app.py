@@ -231,21 +231,32 @@ def main():
                 # handedness 适配为旧风格对象，避免改 draw_info_text(...)
                 legacy_handed = handedness_to_legacy(handedness_categories)
 
-                debug_image = draw_info_text(
-                    debug_image,
-                    brect,
-                    legacy_handed,
-                    keypoint_classifier_labels[hand_sign_id],
-                    point_history_classifier_labels[most_common_fg_id[0][0]],
-                )
-                
-                # 在左上角追加 FullSeq 分类结果
+                # legacy draw text for point history
+                # debug_image = draw_info_text(
+                #     debug_image,
+                #     brect,
+                #     legacy_handed,
+                #     keypoint_classifier_labels[hand_sign_id],
+                #     point_history_classifier_labels[most_common_fg_id[0][0]],
+                # )
+                    
+                # 1) buffer 状态
+                buf_txt = f'FullSeq buf: {len(fullseq_history_list)}/16'
+                cv.putText(debug_image, buf_txt, (10, 140), cv.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 4, cv.LINE_AA)
+                cv.putText(debug_image, buf_txt, (10, 140), cv.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2, cv.LINE_AA)
+
+                # 2) 有无手
+                has_hand = (result.hand_landmarks is not None and len(result.hand_landmarks) > 0)
+                cv.putText(debug_image, f'Hand: {"YES" if has_hand else "NO"}', (10, 160),
+                        cv.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 4, cv.LINE_AA)
+                cv.putText(debug_image, f'Hand: {"YES" if has_hand else "NO"}', (10, 160),
+                        cv.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0) if has_hand else (200,200,200), 2, cv.LINE_AA)
+
+                # 3) 预测结果（只有满 16 帧才显示）
                 if label is not None:
                     txt = f'FullSeq: {label} ({score:.2f})'
-                    cv.putText(debug_image, txt, (10, 120), cv.FONT_HERSHEY_SIMPLEX,
-                            0.6, (0, 0, 0), 4, cv.LINE_AA)
-                    cv.putText(debug_image, txt, (10, 120), cv.FONT_HERSHEY_SIMPLEX,
-                            0.6, (255, 255, 255), 2, cv.LINE_AA)
+                    cv.putText(debug_image, txt, (10, 180), cv.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,0), 4, cv.LINE_AA)
+                    cv.putText(debug_image, txt, (10, 180), cv.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2, cv.LINE_AA)
 
         else:
             point_history.append([0, 0])
