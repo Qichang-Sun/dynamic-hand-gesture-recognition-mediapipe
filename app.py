@@ -15,7 +15,7 @@ import itertools
 # ===== 已有的模块 =====
 from utils import CvFpsCalc
 from model import KeyPointClassifier, PointHistoryClassifier
-# from model import FullSequenceClassifier
+from model import FullSequenceClassifier
 
 # ===== 新增：Tasks API =====
 from mediapipe.tasks import python as mp_python
@@ -116,12 +116,12 @@ def main():
     # ========= 训练好的分类器 =========
     keypoint_classifier = KeyPointClassifier()
     point_history_classifier = PointHistoryClassifier()
-    # fullseq_classifier = FullSequenceClassifier(
-    #     model_path='model/full_sequence_classifier/full_sequence_classifier.tflite',
-    #     label_path='model/full_sequence_classifier/full_sequence_classifier_label.csv',
-    #     time_steps=16,
-    #     dim_per_frame=42
-    # )
+    fullseq_classifier = FullSequenceClassifier(
+        model_path='model/full_sequence_classifier/full_sequence_classifier.tflite',
+        label_path='model/full_sequence_classifier/full_sequence_classifier_label.csv',
+        time_steps=16,
+        dim_per_frame=42
+    )
 
 
     # ========= 标签文件 =========
@@ -218,11 +218,11 @@ def main():
                 most_common_fg_id = Counter(finger_gesture_history).most_common()
 
                 # === 全手时序分类（当缓冲满16帧时）===
-                # if len(fullseq_history_list) == 16:
-                #     flat = list(itertools.chain.from_iterable(list(fullseq_history_list)))
-                #     score, label = fullseq_classifier.infer(np.array(flat, dtype=np.float32))
-                # else:
-                #     score, label = None, None, None
+                if len(fullseq_history_list) == 16:
+                    flat = list(itertools.chain.from_iterable(list(fullseq_history_list)))
+                    score, label = fullseq_classifier.infer(np.array(flat, dtype=np.float32))
+                else:
+                    score, label = None, None
 
                 # === 绘制 ===
                 debug_image = draw_bounding_rect(use_brect, debug_image, brect)
@@ -240,12 +240,12 @@ def main():
                 )
                 
                 # 在左上角追加 FullSeq 分类结果
-                # if label is not None:
-                #     txt = f'FullSeq: {label} ({score:.2f})'
-                #     cv.putText(debug_image, txt, (10, 120), cv.FONT_HERSHEY_SIMPLEX,
-                #             0.6, (0, 0, 0), 4, cv.LINE_AA)
-                #     cv.putText(debug_image, txt, (10, 120), cv.FONT_HERSHEY_SIMPLEX,
-                #             0.6, (255, 255, 255), 2, cv.LINE_AA)
+                if label is not None:
+                    txt = f'FullSeq: {label} ({score:.2f})'
+                    cv.putText(debug_image, txt, (10, 120), cv.FONT_HERSHEY_SIMPLEX,
+                            0.6, (0, 0, 0), 4, cv.LINE_AA)
+                    cv.putText(debug_image, txt, (10, 120), cv.FONT_HERSHEY_SIMPLEX,
+                            0.6, (255, 255, 255), 2, cv.LINE_AA)
 
         else:
             point_history.append([0, 0])
