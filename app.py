@@ -26,8 +26,8 @@ def get_args():
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--device", type=int, default=0)
-    parser.add_argument("--width", help='cap width', type=int, default=960)
-    parser.add_argument("--height", help='cap height', type=int, default=540)
+    parser.add_argument("--width", help='cap width', type=int, default=640)
+    parser.add_argument("--height", help='cap height', type=int, default=480)
 
     parser.add_argument('--use_static_image_mode', action='store_true')
     parser.add_argument("--min_detection_confidence",
@@ -78,6 +78,14 @@ def handedness_to_legacy(handedness_categories):
     return types.SimpleNamespace(classification=classification)
 
 
+def fourcc_from_cap(cap):
+    v = int(cap.get(cv.CAP_PROP_FOURCC))
+    v &= 0xFFFFFFFF  # 转成无符号 32 位
+    # OpenCV 按小端序存储 FOURCC：最低字节是第一个字符
+    fourcc = "".join(chr((v >> (8*i)) & 0xFF) for i in range(4))
+    return fourcc, v
+
+
 def main():
     # ========= 参数 =========
     args = get_args()
@@ -94,9 +102,10 @@ def main():
     use_brect = True
 
     # ========= 摄像头 =========
-    cap = cv.VideoCapture(cap_device)
+    cap = cv.VideoCapture(cap_device, cv.CAP_DSHOW)
     cap.set(cv.CAP_PROP_FRAME_WIDTH, cap_width)
     cap.set(cv.CAP_PROP_FRAME_HEIGHT, cap_height)
+    # cap.set(cv.CAP_PROP_FPS, 30)
 
     # ========= MediaPipe Tasks: HandLandmarker 初始化 =========
     running_mode = (mp_vision.RunningMode.IMAGE
@@ -117,7 +126,7 @@ def main():
     keypoint_classifier = KeyPointClassifier()
     point_history_classifier = PointHistoryClassifier()
     fullseq_classifier = FullSequenceClassifier(
-        model_path='model/full_sequence_classifier/full_sequence_classifier.tflite',
+        model_path='model/full_sequence_classifier/full_sequence_classifier_1030.tflite',
         label_path='model/full_sequence_classifier/full_sequence_classifier_label.csv',
         time_steps=16,
         dim_per_frame=42
@@ -158,9 +167,13 @@ def main():
         # 读帧
         ret, frame_bgr = cap.read()
         if not ret:
+            print(f"Camera stream is not available")
             break
-        frame_bgr = cv.flip(frame_bgr, 1)
+        # frame_bgr = cv.flip(frame_bgr, 1)
         debug_image = copy.deepcopy(frame_bgr)
+
+        # fourcc_str, fourcc_val = fourcc_from_cap(cap)
+        # print("FOURCC:", fourcc_str, " hex:", hex(fourcc_val))
 
         # 转成 MediaPipe Image（SRGB）
         frame_rgb = cv.cvtColor(frame_bgr, cv.COLOR_BGR2RGB)
@@ -264,7 +277,7 @@ def main():
         debug_image = draw_point_history(debug_image, point_history)
         debug_image = draw_info(debug_image, fps, mode, number)
 
-        cv.imshow('Hand Gesture Recognition (Tasks API)', debug_image)
+        cv.imshow('Hand Gesture Recognition', debug_image)
 
     cap.release()
     cv.destroyAllWindows()
@@ -595,7 +608,7 @@ def draw_bounding_rect(use_brect, image, brect):
     if use_brect:
         # Outer rectangle
         cv.rectangle(image, (brect[0], brect[1]), (brect[2], brect[3]),
-                     (0, 0, 0), 1)
+                     (255, 0, 0), 1)
 
     return image
 
