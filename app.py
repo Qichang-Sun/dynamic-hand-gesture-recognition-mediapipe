@@ -126,7 +126,7 @@ def main():
     keypoint_classifier = KeyPointClassifier()
     point_history_classifier = PointHistoryClassifier()
     fullseq_classifier = FullSequenceClassifier(
-        model_path='model/full_sequence_classifier/full_sequence_classifier_1030.tflite',
+        model_path='model/full_sequence_classifier/full_sequence_classifier.tflite',
         label_path='model/full_sequence_classifier/full_sequence_classifier_label.csv',
         time_steps=16,
         dim_per_frame=42
