@@ -80,7 +80,9 @@ class FullSequenceClassifier:
         self.interpreter.set_tensor(self.input_index, x_feat)
         self.interpreter.invoke()
         y = self.interpreter.get_tensor(self.output_index)[0]
-        class_id = int(np.argmax(y))
-        score = float(np.max(y))
+
+        probs = np.exp(y) / np.sum(np.exp(y))  # softmax
+        class_id = int(np.argmax(probs))
+        score = float(np.max(probs))
         label = self.labels[class_id] if class_id < len(self.labels) else str(class_id)
         return score, label
