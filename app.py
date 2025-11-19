@@ -105,7 +105,7 @@ def main():
     cap = cv.VideoCapture(cap_device, cv.CAP_DSHOW)
     cap.set(cv.CAP_PROP_FRAME_WIDTH, cap_width)
     cap.set(cv.CAP_PROP_FRAME_HEIGHT, cap_height)
-    # cap.set(cv.CAP_PROP_FPS, 30)
+    cap.set(cv.CAP_PROP_FPS, 24)
 
     # ========= MediaPipe Tasks: HandLandmarker 初始化 =========
     running_mode = (mp_vision.RunningMode.IMAGE
@@ -126,7 +126,7 @@ def main():
     keypoint_classifier = KeyPointClassifier()
     point_history_classifier = PointHistoryClassifier()
     fullseq_classifier = FullSequenceClassifier(
-        model_path='model/full_sequence_classifier/full_sequence_classifier_1112.tflite',
+        model_path='model/full_sequence_classifier/full_sequence_classifier.tflite',
         label_path='model/full_sequence_classifier/full_sequence_classifier_label.csv',
         time_steps=16,
         dim_per_frame=42
